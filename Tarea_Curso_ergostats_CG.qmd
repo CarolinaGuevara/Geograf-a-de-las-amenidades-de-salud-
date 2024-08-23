@@ -1,0 +1,199 @@
+---
+title: "Análisis de amenidades de salud en la parroquia de Nuevo Rocafuerte en el cantón Aguarico, Ecuador"
+author: "Carolina Guevara"
+date: "Agosto 2024"
+format: docx
+editor: visual
+---
+
+## Amenidades de salud en el cantón más rico de Ecuador: Aguarico en la provincia de Orellana
+
+El cantón más rico de Ecuador en términos de su PIB per capita es Aguarico. En esta oportunidad, me centraré en analizar las amenidades de salud de la parroquia cabecera cantonal de este cantón que es Nuevo Rocafuerte y su código es 220250.
+
+## Consulta al OpenStreetMaps
+
+Para nosotros hacer la consulta, nos debemos acordar de las *Boundary Box:*
+
+```{r, message=FALSE}
+library(osmdata)
+library(sf)
+library(tidyverse)
+library(readxl)
+library(spdep)
+library(lattice)
+
+
+
+bbox<-getbb("Orellana, Ecuador")
+query<-opq(bbox) %>%
+  add_osm_feature( key="amenity", value="hospital" ) %>%
+  osmdata_sf()
+
+puntos<-query$osm_points
+
+```
+
+Poner en un mapa los puntos
+
+```{r, message=FALSE}
+st_layers("data/GEODATABASE_NACIONAL_2021/GEODATABASE_NACIONAL_2021.gdb/")
+
+zonas<-st_read("data/GEODATABASE_NACIONAL_2021/GEODATABASE_NACIONAL_2021.gdb/", layer="zon_a")
+
+zonas<-zonas %>% 
+  filter(str_detect(zon, "^22"))
+
+```
+
+Para graficar, empleamos el ggplot y consideramos las opciones de chunk
+
+```{r, echo=FALSE, fig.height=6, fig.dpi=300}
+ggplot()+
+  geom_sf(data=zonas)+
+  geom_sf(data=puntos)+
+  labs(
+    title ="Figura 1. Distribución de hospitales en Orellana",
+    subtitle= "Fuente: OpenStreetMaps"
+  )+
+  theme_minimal()
+```
+
+Ahora procedemos a cargar la información de población por parroquias
+
+```{r}
+excel_sheets("data/01_2022_CPV_Estructura_poblacional.xlsx")
+poblacion<-read_excel("data/01_2022_CPV_Estructura_poblacional.xlsx", 
+                      sheet="1.2",
+                      range="B10:G1299")
+names(poblacion)<- c("provincia", "canton", "parroquia", "total_nacional", "hombres", "mujeres")
+
+
+
+poblacion %>% 
+  filter(!is.na(provincia),
+         str_detect(parroquia, "^Total|Nacional", negate =TRUE ))
+
+poblacion <- poblacion %>%
+  mutate(across(c(provincia, canton, parroquia), str_to_upper))
+
+```
+
+Ahora leemos la codificación DPA del INEC.
+
+```{r}
+dpa<- read_excel("data/CODIFICACIÓN_2022.xlsx", sheet="CODIGOS")
+```
+
+Ahora usamos las funciones join:
+
+```{r}
+poblacion <- poblacion %>% 
+  left_join(dpa, by = c("provincia"= "DPA_DESPRO",
+                        "canton" = "DPA_DESCAN",
+                        "parroquia" = "DPA_DESPAR"))
+```
+
+Ahora unimos los polígonos a nivel de parroquia porque están a nivel de zona censal:
+
+```{r}
+zonas<-zonas %>% 
+  mutate(DPA_PARROQ = str_sub(zon, 1, 6))
+
+parroquias <- zonas %>% 
+  group_by(DPA_PARROQ) %>% 
+  summarise(Shape = st_union(Shape))
+
+```
+
+Unimos los datos de población
+
+```{r}
+parroquias <- parroquias %>% 
+  left_join(poblacion)
+
+```
+
+Mapas de calor
+
+```{r, echo=FALSE, fig.height=6, fig.dpi=300}
+parroquias %>% 
+  ggplot()+
+  geom_sf(aes(fill = log(total_nacional)))+
+  geom_sf(data=puntos)+
+  scale_fill_gradient(low="#a39bca", high="#4424d1")+
+  labs ("Figura 2. Densidad poblacional de Orellana por parroquias", caption= "Fuente: INEC")
+
+```
+
+De la Figura 2, se puede observar que existen más hospitales en las parroquias con mayor densidad poblacional. Este es el caso de la parroquia El Coca del cantón Francisco de Orellana, lo cual puede deberse a la presencia de empresas petroleras. Además, se puede visualizar que hay parroquias que no tienen disponibilidad de hospitales, generalmente las más grandes en territorio. Esto puede deberse a la presencia de selva en estas zonas.
+
+Ahora vamos a calcular el indicador de amenidades por cada mil habitantes. Homologamos el sistema de coordenadas de los puntos a las parroquias.
+
+```{r}
+puntos <- st_transform(x = puntos, crs = st_crs(parroquias)) 
+parroquias_puntos <- st_join(x = puntos, y = parroquias, join = st_within)
+parroquias_puntos <-  parroquias_puntos %>% 
+  count(DPA_PARROQ, name = "hospitales") %>% 
+  as_tibble()
+
+parroquias <- parroquias %>% 
+  left_join(parroquias_puntos)
+
+parroquias <- parroquias %>% 
+  mutate(hospitales = replace_na(hospitales, 0))
+
+
+```
+
+### Cálculo del indicador de amenidades de salud por habitante
+
+Ahora, calculamos el indicador.
+
+```{r, echo=FALSE, fig.height=6, fig.dpi=300}
+parroquias <- parroquias %>% 
+  mutate(indicador = (hospitales/total_nacional)*1000)
+
+parroquias %>% 
+  ggplot()+
+  geom_sf(aes(fill = indicador))+
+  scale_fill_gradient(low="white", high="blue")+
+  labs(title= "Figura 3. Hospitales por cada mil habitantes en cada parroquia de la provincia de Orellana",
+       caption = "Fuente: INEC")
+
+```
+
+La Figura 3 muestra que al relativizar el número de hospitales por el número de habitantes en cada parroquia, la parroquia con más hospitales por habitante es El Edén en el cantón Francisco de Orellana, le sigue Garcá Moreno del cantón Francisco de Orellana. Si bien El Coca registró un mayor número de hospitales, ahora se ubica en 5to lugar en la medida de hospitales por cada habitante. Esto indica que tomando en cuenta la población, el número de hospitales que tiene El Coca puede ser no suficiente.
+
+### Matriz de Vecindad y Pesos Espaciales
+
+Para calcular el índice de Moran, determinamos las matrices de pesos espaciales basada en la contigüidad. Luego, creamos una matriz de pesos espaciales utilizando `nb2listw`, estandarizada por fila (cada fila suma a 1).
+
+```{r}
+vecinos <- poly2nb(parroquias, queen=TRUE)
+vecinos_pesos <- nb2listw(vecinos, style="W")
+matriz <- listw2mat(vecinos_pesos)
+```
+
+### Cálculo del Índice de Moran $I$
+
+Calculamos el índice de Moran $I$ para evaluar la autocorrelación espacial.
+
+```{r}
+moran <- moran.test(parroquias$indicador, listw = vecinos_pesos)
+
+moran
+```
+
+#### Interpretación del Resultado de Moran $I$
+
+El resultado de la prueba de Moran $I$ es -0.0192, lo que indicaría que hay correlación espacial negativa en el caso de las parroquias de Orellana. Sin embargo, el p-valor es mayor a 0.05, es decir que no se rechaza que la distribución de los hospitales por habitante sea aleatoria.
+
+### Cálculo del Índice de local Moran $I$
+
+```{r}
+local_i<- localmoran(parroquias$indicador, listw= vecinos_pesos) 
+local_i
+```
+
+```         
+```
